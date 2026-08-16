@@ -1,0 +1,41 @@
+{
+  // Deploy config for the Cloudflare Worker this app ships as.
+  //
+  // `vite build` runs nitro with the `cloudflare-module` preset, which emits its
+  // own .output/server/wrangler.json. That generated file derives the Worker
+  // name from the repo directory — which is NOT the name this app is deployed
+  // under — so deploying with it creates a second Worker on a different URL.
+  // This file is the source of truth instead:
+  //
+  //   npm run build
+  //   npm run deploy        # wrangler deploy, using this config
+  //
+  // Everything below mirrors what the nitro preset generates, except `name`.
+  "name": "agentlab-research-hub",
+
+  // Nitro's SSR entry. `src/server.ts` is the authored entry; this is the
+  // bundled result of it.
+  "main": ".output/server/index.mjs",
+  "compatibility_date": "2026-08-15",
+
+  // The SSR bundle pulls in Node built-ins (via @supabase/supabase-js among
+  // others), which Workers only provides under this flag.
+  "compatibility_flags": ["nodejs_compat"],
+
+  // Static client assets. The ASSETS binding name is what the nitro preset
+  // expects at runtime — renaming it breaks asset serving.
+  "assets": {
+    "binding": "ASSETS",
+    "directory": ".output/public"
+  },
+
+  // nitro has already bundled everything; running it through wrangler's bundler
+  // again would rewrite module resolution and break the build.
+  "no_bundle": true,
+  "rules": [
+    {
+      "type": "ESModule",
+      "globs": ["**/*.mjs", "**/*.js"]
+    }
+  ]
+}
