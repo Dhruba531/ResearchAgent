@@ -32,10 +32,25 @@ dist-ssr
 *.sln
 *.sw?
 
+# Python (backend)
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Backend runtime state (local SQLite DB + generated run artifacts)
+data/
+
 # Env / secrets
 .env
 .env.*
 !.env.example
+*.key
+*.pem
 
 # Lockfile: this repo uses bun.lock
 package-lock.json
