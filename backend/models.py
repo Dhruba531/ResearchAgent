@@ -78,14 +78,9 @@ class ProviderKey(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
     provider: Mapped[str] = mapped_column(String(40), index=True)
-    # Ciphertext, not the raw key (see crypto.py). Text rather than a bounded String
-    # because Fernet output is longer than the key it wraps and grows with it.
     api_key: Mapped[str] = mapped_column(Text)
     model_name: Mapped[str] = mapped_column(String(120), default="")
-    # Stored separately so the UI can show "…a1b2" without ever decrypting the key.
     key_last4: Mapped[str] = mapped_column(String(8), default="")
-    # Defaults to off: saving a key must never be enough to start spending on it.
-    # Enabling is a second, explicit action (and what real_runner checks).
     is_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)
@@ -170,10 +165,6 @@ class Run(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     session_id: Mapped[int] = mapped_column(ForeignKey("agent_sessions.id"), index=True)
-    # project_id is reachable via session, but is denormalised here on purpose: every
-    # ownership guard in app.py scopes a run to its owner, and the spend query in
-    # cost.py joins runs to projects directly. Both would otherwise pay for an extra
-    # hop on the hottest paths in the API.
     project_id: Mapped[int] = mapped_column(ForeignKey("projects.id"), index=True)
     brief_id: Mapped[int] = mapped_column(ForeignKey("briefs.id"))
     config_json: Mapped[Dict[str, Any]] = mapped_column(JSON, default=dict)

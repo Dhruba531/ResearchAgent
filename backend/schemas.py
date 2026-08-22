@@ -79,9 +79,6 @@ class CostEstimateIn(BaseModel):
     @field_validator("budget_threshold")
     @classmethod
     def _finite_budget(cls, value: float) -> float:
-        # ge/le alone do not stop NaN — every comparison against it is False, so a
-        # NaN budget passes the bounds and then makes every downstream cost check
-        # ("spend > threshold") false as well, i.e. an unbounded run.
         if not math.isfinite(value):
             raise ValueError("must be finite")
         return value
@@ -98,9 +95,6 @@ class RunCreate(BaseModel):
     @field_validator("budget_threshold")
     @classmethod
     def _finite_budget(cls, value: float) -> float:
-        # ge/le alone do not stop NaN — every comparison against it is False, so a
-        # NaN budget passes the bounds and then makes every downstream cost check
-        # ("spend > threshold") false as well, i.e. an unbounded run.
         if not math.isfinite(value):
             raise ValueError("must be finite")
         return value
@@ -108,16 +102,9 @@ class RunCreate(BaseModel):
 
 class ProviderKeyIn(BaseModel):
     provider: str = Field(min_length=1, max_length=40)
-    # Upper bound is generous because service-account keys are long; the lower bound
-    # just rejects obvious paste errors before the key is encrypted and stored.
     api_key: str = Field(min_length=8, max_length=4096)
     model_name: str = Field(default="", max_length=120)
     is_enabled: bool = False
-
-
-# Note the asymmetry with ProviderKeyIn: nothing on the way out carries the key
-# itself. The client gets `masked_key`/`key_last4` for display and `is_configured`
-# to render state, so a stored secret has no path back through the API.
 
 
 class ProviderKeyOut(BaseModel):
