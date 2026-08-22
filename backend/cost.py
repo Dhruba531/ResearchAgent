@@ -10,6 +10,7 @@ cap per deployment via the env var.
 """
 
 import os
+from functools import lru_cache
 from datetime import datetime
 from typing import Dict, List, Tuple
 
@@ -97,13 +98,6 @@ def image_cost_usd(provider: str, n: int = 1) -> float:
 
 
 def price_per_million(model: str) -> Tuple[float, float]:
-    """Resolve (input, output) price per 1M tokens for a model id.
-
-    Substring match against the table above, so a dated model id
-    ("claude-opus-4-8-20260115") still prices correctly. The fallback is the most
-    expensive tier on purpose: an unrecognised model must overstate spend, since
-    understating it would let a run slip past the monthly cap.
-    """
     m = (model or "").lower()
     for key, p_in, p_out in _PRICES:
         if key in m:
@@ -114,10 +108,96 @@ def price_per_million(model: str) -> Tuple[float, float]:
 def cost_usd(model: str, input_tokens: int, output_tokens: int) -> float:
     """Dollar cost of a call given its real token usage."""
     p_in, p_out = price_per_million(model)
-    # Six decimals, not two: a single cheap stage can cost well under a cent, and
-    # rounding to cents here would floor those stages to $0 — the ledger would then
-    # drift further from real spend with every call it recorded.
     return round((max(0, input_tokens) * p_in + max(0, output_tokens) * p_out) / 1_000_000, 6)
+
+
+@lru_cache(maxsize=8)
+def _agentic_call_ceiling(reviewers: int) -> int:
+    """The most model calls _run_agentic can legally make.
+
+    Counting the action caps is not enough. The completeness backstop that runs
+    after the loop fills any REQUIRED output that is missing, and it deliberately
+    does not consult ACTION_CAPS — real_runner says so directly: "the completeness
+    backstop supplies them if an action cap was reached". A late draft or revise
+    invalidates the citation audit and the reviews, so a run that already spent
+    both its verify and review caps can still owe a verify plus a whole reviewer
+    panel afterwards. Pricing the caps alone understated that by four calls.
+
+    So walk the orchestrator's own state machine instead of approximating it:
+    enumerate every legal action sequence using the real ``allowed_actions``, add
+    the backstop each one would trigger, and take the worst. Cheap enough to do
+    once per reviewer count and cached, and it cannot drift from the runner
+    because it calls the runner's own decision function.
+    """
+    from real_runner import ACTION_CAPS, MAX_AGENTIC_STEPS, _OUTPUT_KEY, allowed_actions
+
+    def backstop(ctx, reviews) -> int:
+        extra, ctx, reviews = 0, dict(ctx), dict(reviews)
+        for action in ("plan", "draft", "verify", "review"):
+            if action == "review":
+                if reviews:
+                    continue
+                extra += reviewers
+                reviews = {"filled": "x"}
+            else:
+                if ctx.get(_OUTPUT_KEY[action]):
+                    continue
+                extra += 1
+                ctx[_OUTPUT_KEY[action]] = "x"
+        return extra
+
+    best = 0
+
+    def walk(step, counts, ctx, reviews, verify_forced, review_forced, calls) -> None:
+        nonlocal best
+
+        def finish_here(total: int) -> None:
+            nonlocal best
+            best = max(best, total + backstop(ctx, reviews))
+
+        if step > MAX_AGENTIC_STEPS:
+            return finish_here(calls)
+        allowed = allowed_actions(counts, ctx, reviews)
+        # The loop does not let the orchestrator roam freely: a changed paper
+        # forces re-verification, and a fresh citation audit forces a new panel.
+        # Ignoring that explores sequences the runner cannot take and overprices
+        # the gate.
+        if verify_forced:
+            if counts.get("verify", 0) >= ACTION_CAPS["verify"]:
+                return finish_here(calls)
+            allowed = ["verify"]
+        elif review_forced:
+            if counts.get("review", 0) >= ACTION_CAPS["review"]:
+                return finish_here(calls)
+            allowed = ["review"]
+        if not allowed:
+            return finish_here(calls)
+        if allowed == ["finish"]:
+            return finish_here(calls)  # taken without an orchestrator call
+
+        for action in allowed:
+            spent = calls + 1  # the orchestrator's decide call for this step
+            if action == "finish":
+                finish_here(spent)
+                continue
+            ncounts, nctx, nreviews = dict(counts), dict(ctx), dict(reviews)
+            nverify, nreview = verify_forced, review_forced
+            if action == "review":
+                spent += reviewers
+                nreviews, nreview = {"filled": "x"}, False
+            else:
+                spent += 1
+                nctx[_OUTPUT_KEY[action]] = "x"
+                if action in {"draft", "revise"}:
+                    nctx.pop("citations", None)
+                    nreviews, nverify, nreview = {}, True, False
+                elif action == "verify":
+                    nverify, nreview = False, True
+            ncounts[action] = ncounts.get(action, 0) + 1
+            walk(step + 1, ncounts, nctx, nreviews, nverify, nreview, spent)
+
+    walk(1, {}, {}, {}, False, False, 0)
+    return best
 
 
 def estimate_real_run(
@@ -146,16 +226,41 @@ def estimate_real_run(
     without persisting the paper it already paid for.
     """
     complexity = max(0.1, min(float(complexity), 10.0))
-    base_calls = 10 if orchestration == "pipeline" else 14
-    calls = base_calls
+    reviewers = len(agents.REVIEWERS)
+    # Defaults keep the assumptions block below valid in both branches. Agentic
+    # mode leaves rounds at 1 because it genuinely has no refinement-round knob.
+    rounds = 1
+    per_extra_round = reviewers + 1
+    orchestration_note = ""
+
+    if orchestration == "pipeline":
+        calls = 10
+        # The base figure already covers one review+revise round; each additional
+        # refinement round costs a full panel plus one editor pass. Reviewer count is
+        # read from the panel definition so the two cannot drift apart.
+        rounds = max(1, int(revise_iterations))
+        per_extra_round = reviewers + 1
+        calls += (rounds - 1) * per_extra_round
+    else:
+        # Agentic mode never reads revise_iterations — its cadence is fixed by the
+        # orchestrator loop's own caps — so pricing it off that knob describes a run
+        # that cannot happen, and understated the real ceiling by roughly 1.8x.
+        #
+        # Derive it from the caps the loop actually enforces: one orchestrator
+        # decision per step, plus the action each step performs. A "review" action
+        # is a full reviewer panel, not one call, which is where most of the
+        # missing cost was. Imported lazily because real_runner imports this module.
+        calls = _agentic_call_ceiling(reviewers)
+        orchestration_note = (
+            f"Agentic mode is priced at its own worst case ({calls} model calls), "
+            f"derived from the orchestrator's action limits plus the completeness "
+            f"backstop that reruns verification and the {reviewers}-reviewer panel "
+            f"when a late revision invalidates them. It has no refinement-round "
+            f"setting, so that field does not change this estimate."
+        )
+
     if advisor:
         calls += 3  # plan critique, delivery critique, possible final polish
-    # The base figure already covers one review+revise round; each additional
-    # refinement round costs a full panel plus one editor pass. Reviewer count is
-    # read from the panel definition so the two cannot drift apart.
-    rounds = max(1, int(revise_iterations))
-    per_extra_round = len(agents.REVIEWERS) + 1
-    calls += (rounds - 1) * per_extra_round
     # The research swarm is one lead delegation call, one call per worker, and
     # one lead synthesis call. Fan-out is the whole point of a multi-agent
     # design and also the whole cost of it — an unpriced swarm would let a run
@@ -208,6 +313,8 @@ def estimate_real_run(
             f"Covers up to {rounds} refinement rounds "
             f"({per_extra_round} extra calls each: {len(agents.REVIEWERS)}-reviewer panel + editor revision)."
         )
+    if orchestration_note:
+        assumptions.append(orchestration_note)
     if research_swarm:
         assumptions.append(
             f"Includes a {max(1, int(swarm_subagents))}-worker research swarm "
@@ -260,10 +367,5 @@ def monthly_commitment(db: Session, user_id: int) -> float:
         )
         .all()
     )
-    # An in-flight run has only partially metered its cost, so the cap has to account
-    # for what it is still expected to spend — otherwise a user could start many runs
-    # at once and every one of them would pass the budget check on stale numbers.
-    # Clamped at zero so a run that already overshot its estimate is not double-counted
-    # here (the overshoot is already in `spent`).
     reserved = sum(max(0.0, float(run.cost_estimate or 0) - float(run.actual_cost or 0)) for run in active)
     return spent + reserved

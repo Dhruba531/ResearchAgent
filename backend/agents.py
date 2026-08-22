@@ -33,12 +33,6 @@ from __future__ import annotations
 
 from typing import Dict, List, Optional, Tuple
 
-# Prompt convention used throughout this module: prior-stage output is wrapped in
-# XML-ish tags (<brief>…</brief>, <draft>…</draft>) rather than pasted in after a
-# label. The tags give the model an unambiguous boundary between the instructions
-# and the possibly-untrusted text it is being handed, so an idea that itself reads
-# like an instruction is far less likely to be followed as one.
-
 # ---------------------------------------------------------------------------
 # Reviewer personas for the panel stage.
 # ---------------------------------------------------------------------------
@@ -539,7 +533,4 @@ def build_prompt(
         raise ValueError("Unknown stage: %r" % stage)
     ctx = ctx or {}
     system, user = _BUILDERS[stage](ctx)
-    # MAX_TOKENS is indexed, not .get()-ed: a stage registered in _BUILDERS without
-    # a token budget is a programming error and should fail loudly here rather than
-    # silently run with an unbounded (i.e. provider-default) ceiling.
     return system, user, MAX_TOKENS[stage], _web_search_tools(stage, ctx)
