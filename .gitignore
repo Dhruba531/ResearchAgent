@@ -54,3 +54,14 @@ data/
 
 # Lockfile: this repo uses bun.lock
 package-lock.json
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+.coverage
+coverage.json
+.ruff_cache/
+
+# Node
+node_modules
